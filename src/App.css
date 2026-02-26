@@ -13,8 +13,8 @@ html, body {
   width: 100%;
   justify-content: center;
   align-items: center;
-  padding: 20px;
   box-sizing: border-box;
+  padding: 20px 5%;
 }
 
 
