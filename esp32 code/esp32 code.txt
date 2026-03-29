@@ -1,0 +1,218 @@
+/* -------------------------------------------------------------
+   Microplastic Detection System (Professional IoT Version)
+   Hardware: ESP32 + ADS1115 + BPW34
+   Backend: Node.js (Express) via HTTP POST
+
+   Design:
+   - ESP32 samples fast
+   - Sends summarized data per time window
+   - Deterministic (NO ML)
+-------------------------------------------------------------- */
+
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <time.h>
+
+// ================== OBJECTS ==================
+Adafruit_ADS1115 ads;
+
+// ================== WIFI ==================
+const char* WIFI_SSID = "ASHWIN";
+const char* WIFI_PASS = "12345678";
+
+// ================== BACKEND ==================
+const char* SERVER_URL = "http://192.168.29.35:3000/api/telemetry"; // change IP
+
+// ================== TIMING ==================
+const int READ_INTERVAL_MS   = 100;     // sensor sampling
+const int WINDOW_MS          = 10000;   // reporting window
+const int POST_RETRY_DELAY   = 3000;
+
+// ================== SIGNAL ==================
+const int   MOVING_AVG_N = 10;
+const float EVENT_THRESHOLD_MULT = 1.5;
+// const float EVENT_THRESHOLD_MULT = 4.0; testing
+
+// ================== GLOBALS ==================
+unsigned long lastRead       = 0;
+unsigned long windowStart    = 0;
+unsigned long lastPostTry    = 0;
+
+float samples[MOVING_AVG_N];
+int sampleIndex = 0;
+
+float recentAvg   = 0.0;
+float baseline    = 0.0;
+float baselineStd = 0.0;
+bool  baselineReady = false;
+
+unsigned long lastEventTime = 0;
+int eventCountWindow = 0;
+int eventCountTotal  = 0;
+
+// ================== UTILS ==================
+float adcToVoltage(int16_t raw) {
+  return raw * (4.096 / 32768.0);
+}
+
+// ================== WIFI ==================
+void ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  Serial.println("WiFi disconnected, reconnecting...");
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println(WiFi.status() == WL_CONNECTED ? "\nWiFi reconnected" : "\nWiFi failed");
+}
+
+// ================== TIME ==================
+long getEpoch() {
+  time_t now;
+  time(&now);
+  if (now < 100000) return millis() / 1000;  // fallback
+  return now;
+}
+
+// ================== BASELINE ==================
+void computeBaseline() {
+  const int N = 200;
+  double sum = 0, sumsq = 0;
+
+  Serial.println("Calibrating baseline...");
+  for (int i = 0; i < N; i++) {
+    int16_t raw = ads.readADC_SingleEnded(0);
+    float v = -adcToVoltage(raw);
+    sum += v;
+    sumsq += v * v;
+    delay(10);
+  }
+
+  baseline = sum / N;
+  double var = (sumsq / N) - (baseline * baseline);
+  baselineStd = var > 0 ? sqrt(var) : 0;
+  baselineReady = true;
+
+  Serial.print("Baseline = "); Serial.println(baseline, 6);
+  Serial.print("Noise STD = "); Serial.println(baselineStd, 6);
+}
+
+// ================== HTTP ==================
+void sendWindowToServer(float avgVoltage) {
+  ensureWiFi();
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String payload = "{";
+  payload += "\"device_id\":\"esp32-001\",";
+  payload += "\"timestamp\":" + String(getEpoch()) + ",";
+  payload += "\"window_ms\":" + String(WINDOW_MS) + ",";
+  payload += "\"light_voltage\":" + String(avgVoltage, 6) + ",";
+  payload += "\"event_count_recent\":" + String(eventCountWindow) + ",";
+  payload += "\"baseline\":" + String(baseline, 6) + ",";
+  payload += "\"noise_std\":" + String(baselineStd, 6) + ",";
+  payload += "\"event_count\":" + String(eventCountTotal) + ",";
+  payload += "\"event_detected\":" + String(eventCountTotal > 0 ? "true" : "false");
+  payload += "}";
+
+  int code = http.POST(payload);
+  http.end();
+
+  if (code > 0) {
+    Serial.println("Data sent successfully");
+  } else {
+    Serial.println("Failed to send data");
+  }
+
+  Serial.println(payload);
+}
+
+// ================== SETUP ==================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  Serial.println("\nMicroplastic Detector Starting...");
+
+  if (!ads.begin()) {
+    Serial.println("ADS1115 NOT FOUND");
+    while (1);
+  }
+  ads.setGain(GAIN_ONE);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+  Serial.println(WiFi.localIP());
+
+  // init MA buffer
+  float init = -adcToVoltage(ads.readADC_SingleEnded(0));
+  for (int i = 0; i < MOVING_AVG_N; i++) samples[i] = init;
+
+  windowStart = millis();
+  Serial.println("Press 'c' for baseline calibration");
+}
+
+// ================== LOOP ==================
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'c') computeBaseline();
+  }
+
+  unsigned long now = millis();
+  if (now - lastRead < READ_INTERVAL_MS) return;
+  lastRead = now;
+
+  // ----- SENSOR READ -----
+  float light = -adcToVoltage(ads.readADC_SingleEnded(0));
+
+  samples[sampleIndex++] = light;
+  if (sampleIndex >= MOVING_AVG_N) sampleIndex = 0;
+
+  float sum = 0;
+  for (int i = 0; i < MOVING_AVG_N; i++) sum += samples[i];
+  recentAvg = sum / MOVING_AVG_N;
+
+  // ----- EVENT DETECTION -----
+  if (baselineReady) {
+    float threshold = baseline + EVENT_THRESHOLD_MULT * baselineStd;
+    if (recentAvg > threshold && now - lastEventTime > 150) {
+      eventCountWindow++;
+      eventCountTotal++;
+      lastEventTime = now;
+    }
+
+    Serial.print("V=");
+    Serial.print(recentAvg, 6);
+    Serial.print(" Th=");
+    Serial.print(threshold, 6);
+    Serial.print(" WEvents=");
+    Serial.println(eventCountWindow);
+  }
+
+  // ----- WINDOW SEND -----
+  if (now - windowStart >= WINDOW_MS) {
+    sendWindowToServer(recentAvg);
+    eventCountWindow = 0;
+    windowStart = now;
+  }
+}
