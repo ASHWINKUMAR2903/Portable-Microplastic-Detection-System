@@ -8,14 +8,7 @@ const telemetryRoutes = require("./routes/telemetryRoutes");
 const app = express();
 
 // Middleware
-app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:3000', 
-    'https://portable-microplastic-detection-sys.vercel.app', 
-    'https://portable-microplastic-detection-sys.vercel.app/dashboard'
-  ]
-}));
+app.use(cors());
 app.use(express.json());
 
 // Connect to MongoDB

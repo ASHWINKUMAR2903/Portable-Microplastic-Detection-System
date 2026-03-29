@@ -1,5 +1,5 @@
 //const BASE_URL = "https://52bea2d5e78d.ngrok-free.app";
-const BASE_URL = "https://portable-microplastic-detection-system-1.onrender.com/";
+const BASE_URL = "https://portable-microplastic-detection-system-1.onrender.com";
 
 const NGROK_HEADERS = {
   "ngrok-skip-browser-warning": "true"
