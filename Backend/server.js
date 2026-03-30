@@ -30,8 +30,14 @@ app.use(
   })
 );
 
-// Handle preflight explicitly
-app.options("*", cors());
+// Handle preflight for all routes
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+  } else {
+    next();
+  }
+});
 
 // ─── Middleware ────────────────────────────────────────────────────────
 app.use(express.json());
