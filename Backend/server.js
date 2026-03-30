@@ -7,23 +7,86 @@ const telemetryRoutes = require("./routes/telemetryRoutes");
 // Initialize Express App
 const app = express();
 
-// Middleware
-app.use(cors());
+// ─── CORS Configuration ───────────────────────────────────────────────
+const allowedOrigins = [
+  "https://portable-microplastic-detection-sys.vercel.app",
+  "http://localhost:5173",
+  "http://localhost:3000",
+];
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (mobile apps, curl, ESP32)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  })
+);
+
+// Handle preflight explicitly
+app.options("*", cors());
+
+// ─── Middleware ────────────────────────────────────────────────────────
 app.use(express.json());
 
-// Connect to MongoDB
-connectDB();
-
-// API Routes
-app.use("/api/telemetry", telemetryRoutes);
-
-// Root Endpoint
-app.get("/", (req, res) => {
-  res.send("API is running");
+// Request logger
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.url}`);
+  if (req.method === "POST") {
+    console.log("  Body:", JSON.stringify(req.body).slice(0, 200));
+  }
+  next();
 });
 
-// Start Server
+// ─── Database ─────────────────────────────────────────────────────────
+connectDB();
+
+// ─── API Routes ───────────────────────────────────────────────────────
+app.use("/api/telemetry", telemetryRoutes);
+
+// ─── Root & Health ────────────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    service: "Microplastic Detection API",
+    version: "2.0.0",
+    endpoints: {
+      health: "/health",
+      telemetry: "/api/telemetry",
+      latest: "/api/telemetry/latest",
+      stats: "/api/telemetry/stats",
+    },
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── Global Error Handler ─────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err.message);
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "production" ? undefined : err.message,
+  });
+});
+
+// ─── Start Server ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
 });

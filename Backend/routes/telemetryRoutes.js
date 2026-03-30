@@ -3,7 +3,8 @@ const router = express.Router();
 const {
   storeTelemetry,
   getLatestTelemetry,
-  getTelemetryByRange
+  getTelemetryByRange,
+  getTelemetryStats,
 } = require("../controllers/telemetryController");
 
 // Base path: /api/telemetry
@@ -11,5 +12,6 @@ const {
 router.post("/", storeTelemetry);
 router.get("/", getTelemetryByRange);
 router.get("/latest", getLatestTelemetry);
+router.get("/stats", getTelemetryStats);
 
 module.exports = router;

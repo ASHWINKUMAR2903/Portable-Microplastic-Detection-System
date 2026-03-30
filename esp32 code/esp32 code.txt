@@ -1,17 +1,19 @@
 /* -------------------------------------------------------------
    Microplastic Detection System (Professional IoT Version)
    Hardware: ESP32 + ADS1115 + BPW34
-   Backend: Node.js (Express) via HTTP POST
+   Backend: Node.js (Express) on Render via HTTPS POST
 
    Design:
    - ESP32 samples fast
    - Sends summarized data per time window
    - Deterministic (NO ML)
+   - Posts to Render cloud backend via HTTPS
 -------------------------------------------------------------- */
 
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <time.h>
 
@@ -22,18 +24,23 @@ Adafruit_ADS1115 ads;
 const char* WIFI_SSID = "ASHWIN";
 const char* WIFI_PASS = "12345678";
 
-// ================== BACKEND ==================
-const char* SERVER_URL = "http://192.168.29.35:3000/api/telemetry"; // change IP
+// ================== BACKEND (RENDER HTTPS URL) ==================
+const char* SERVER_URL = "https://portable-microplastic-detection-system-1.onrender.com/api/telemetry";
+
+// ================== NTP TIME CONFIG ==================
+const char* NTP_SERVER = "pool.ntp.org";
+const long  GMT_OFFSET = 19800;     // IST = UTC+5:30 = 19800 seconds
+const int   DAYLIGHT_OFFSET = 0;
 
 // ================== TIMING ==================
 const int READ_INTERVAL_MS   = 100;     // sensor sampling
 const int WINDOW_MS          = 10000;   // reporting window
 const int POST_RETRY_DELAY   = 3000;
+const int MAX_POST_RETRIES   = 3;
 
 // ================== SIGNAL ==================
 const int   MOVING_AVG_N = 10;
 const float EVENT_THRESHOLD_MULT = 1.5;
-// const float EVENT_THRESHOLD_MULT = 4.0; testing
 
 // ================== GLOBALS ==================
 unsigned long lastRead       = 0;
@@ -66,19 +73,24 @@ void ensureWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println(WiFi.status() == WL_CONNECTED ? "\nWiFi reconnected" : "\nWiFi failed");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi reconnected");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi reconnect failed");
+  }
 }
 
 // ================== TIME ==================
 long getEpoch() {
   time_t now;
   time(&now);
-  if (now < 100000) return millis() / 1000;  // fallback
+  if (now < 100000) return millis() / 1000;  // fallback before NTP sync
   return now;
 }
 
@@ -105,15 +117,15 @@ void computeBaseline() {
   Serial.print("Noise STD = "); Serial.println(baselineStd, 6);
 }
 
-// ================== HTTP ==================
+// ================== HTTPS POST ==================
 void sendWindowToServer(float avgVoltage) {
   ensureWiFi();
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No WiFi — skipping send");
+    return;
+  }
 
-  HTTPClient http;
-  http.begin(SERVER_URL);
-  http.addHeader("Content-Type", "application/json");
-
+  // Build JSON payload
   String payload = "{";
   payload += "\"device_id\":\"esp32-001\",";
   payload += "\"timestamp\":" + String(getEpoch()) + ",";
@@ -126,16 +138,45 @@ void sendWindowToServer(float avgVoltage) {
   payload += "\"event_detected\":" + String(eventCountTotal > 0 ? "true" : "false");
   payload += "}";
 
-  int code = http.POST(payload);
-  http.end();
+  Serial.println("Sending: " + payload);
 
-  if (code > 0) {
-    Serial.println("Data sent successfully");
-  } else {
-    Serial.println("Failed to send data");
+  // Retry loop for reliability
+  for (int attempt = 1; attempt <= MAX_POST_RETRIES; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();  // Skip certificate verification (OK for prototype)
+
+    HTTPClient http;
+    http.begin(client, SERVER_URL);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(10000);  // 10 second timeout
+
+    int code = http.POST(payload);
+    String response = http.getString();
+    http.end();
+
+    if (code == 200 || code == 201) {
+      Serial.print("✅ Data sent (attempt ");
+      Serial.print(attempt);
+      Serial.print("): HTTP ");
+      Serial.println(code);
+      Serial.println("Response: " + response);
+      return;  // Success — exit retry loop
+    } else {
+      Serial.print("❌ Attempt ");
+      Serial.print(attempt);
+      Serial.print(" failed: HTTP ");
+      Serial.println(code);
+      if (code < 0) {
+        Serial.println("Connection error (check WiFi/server)");
+      }
+      if (attempt < MAX_POST_RETRIES) {
+        Serial.println("Retrying in " + String(POST_RETRY_DELAY) + "ms...");
+        delay(POST_RETRY_DELAY);
+      }
+    }
   }
 
-  Serial.println(payload);
+  Serial.println("❌ All retries exhausted — data lost for this window");
 }
 
 // ================== SETUP ==================
@@ -143,32 +184,70 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  Serial.println("\nMicroplastic Detector Starting...");
+  Serial.println("\n========================================");
+  Serial.println("  Microplastic Detector v2.0 Starting");
+  Serial.println("========================================");
 
+  // ADS1115 init
   if (!ads.begin()) {
-    Serial.println("ADS1115 NOT FOUND");
+    Serial.println("ERROR: ADS1115 NOT FOUND!");
     while (1);
   }
   ads.setGain(GAIN_ONE);
+  Serial.println("ADS1115 initialized");
 
+  // WiFi connect
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   Serial.print("Connecting WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi Connected");
-  Serial.println(WiFi.localIP());
 
-  // init MA buffer
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi FAILED — will retry in loop");
+  }
+
+  // NTP Time Sync
+  Serial.println("Syncing time via NTP...");
+  configTime(GMT_OFFSET, DAYLIGHT_OFFSET, NTP_SERVER);
+
+  // Wait for time sync (up to 10s)
+  int ntpRetries = 0;
+  time_t now = 0;
+  while (now < 100000 && ntpRetries < 20) {
+    delay(500);
+    time(&now);
+    ntpRetries++;
+    Serial.print(".");
+  }
+
+  if (now > 100000) {
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    Serial.print("\nTime synced: ");
+    Serial.println(asctime(&timeinfo));
+  } else {
+    Serial.println("\nNTP sync failed — using millis() fallback");
+  }
+
+  // Init moving average buffer
   float init = -adcToVoltage(ads.readADC_SingleEnded(0));
   for (int i = 0; i < MOVING_AVG_N; i++) samples[i] = init;
 
   windowStart = millis();
-  Serial.println("Press 'c' for baseline calibration");
+
+  Serial.println("========================================");
+  Serial.println("  System Ready. Press 'c' to calibrate");
+  Serial.println("========================================");
+  Serial.print("Backend URL: "); Serial.println(SERVER_URL);
 }
 
 // ================== LOOP ==================
