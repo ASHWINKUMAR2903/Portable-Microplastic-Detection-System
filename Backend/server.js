@@ -1,11 +1,14 @@
 require("dotenv").config();
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const cors = require("cors");
 const connectDB = require("./config/db");
 const telemetryRoutes = require("./routes/telemetryRoutes");
 
 // Initialize Express App
 const app = express();
+const server = http.createServer(app);
 
 // ─── CORS Configuration ───────────────────────────────────────────────
 const allowedOrigins = [
@@ -39,6 +42,31 @@ app.use((req, res, next) => {
   }
 });
 
+// ─── Socket.IO Setup ──────────────────────────────────────────────────
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  transports: ["websocket", "polling"],
+});
+
+// Track connected clients
+io.on("connection", (socket) => {
+  console.log(`🔌 Client connected: ${socket.id}`);
+
+  socket.on("disconnect", (reason) => {
+    console.log(`🔌 Client disconnected: ${socket.id} (${reason})`);
+  });
+});
+
+// Make io accessible to controllers via req
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
+
 // ─── Middleware ────────────────────────────────────────────────────────
 app.use(express.json());
 
@@ -63,12 +91,16 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     service: "Microplastic Detection API",
-    version: "2.0.0",
+    version: "3.0.0",
+    websocket: true,
+    connectedClients: io.engine.clientsCount,
     endpoints: {
       health: "/health",
       telemetry: "/api/telemetry",
       latest: "/api/telemetry/latest",
       stats: "/api/telemetry/stats",
+      recent: "/api/telemetry/recent",
+      websocket: "ws://<host> (Socket.IO)",
     },
   });
 });
@@ -78,6 +110,7 @@ app.get("/health", (req, res) => {
     status: "healthy",
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
+    websocketClients: io.engine.clientsCount,
   });
 });
 
@@ -90,9 +123,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ─── Start Server ─────────────────────────────────────────────────────
+// ─── Start Server (use `server.listen` for Socket.IO) ─────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🔌 WebSocket ready`);
+  console.log(`🌐 Allowed origins: ${allowedOrigins.join(", ")}`);
 });

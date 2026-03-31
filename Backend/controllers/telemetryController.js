@@ -13,11 +13,19 @@ const storeTelemetry = async (req, res) => {
     const telemetry = new Telemetry(body);
     await telemetry.save();
 
+    const savedData = telemetry.toObject();
+
     console.log("✅ Stored in MongoDB:", {
       device: body.device_id,
       voltage: body.light_voltage,
       events: body.event_count,
     });
+
+    // ─── Emit to all connected WebSocket clients ────────────
+    if (req.io) {
+      req.io.emit("newTelemetry", savedData);
+      console.log(`📡 Emitted to ${req.io.engine.clientsCount} client(s)`);
+    }
 
     res.status(201).json({
       status: "stored",
@@ -43,6 +51,24 @@ const getLatestTelemetry = async (req, res) => {
   } catch (err) {
     console.error("❌ Latest fetch error:", err.message);
     res.status(500).json({ error: "Failed to fetch latest data" });
+  }
+};
+
+// ─── Get recent N records (for charts) ────────────────────────────────
+const getRecentTelemetry = async (req, res) => {
+  try {
+    const count = Math.min(parseInt(req.query.count) || 50, 200);
+
+    const records = await Telemetry.find()
+      .sort({ created_at: -1 })
+      .limit(count)
+      .lean();
+
+    // Return in chronological order (oldest first) for charts
+    res.json(records.reverse());
+  } catch (err) {
+    console.error("❌ Recent fetch error:", err.message);
+    res.status(500).json({ error: "Failed to fetch recent data" });
   }
 };
 
@@ -138,6 +164,7 @@ const getTelemetryStats = async (req, res) => {
 module.exports = {
   storeTelemetry,
   getLatestTelemetry,
+  getRecentTelemetry,
   getTelemetryByRange,
   getTelemetryStats,
 };

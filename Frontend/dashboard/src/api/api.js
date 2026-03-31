@@ -42,6 +42,10 @@ export async function getLatestTelemetry() {
   return apiFetch("/api/telemetry/latest");
 }
 
+export async function getRecentTelemetry(count = 50) {
+  return apiFetch(`/api/telemetry/recent?count=${count}`);
+}
+
 export async function getTelemetry(from, to) {
   const params = new URLSearchParams();
   if (from) params.append("from", from);
@@ -56,3 +60,6 @@ export async function getTelemetryStats() {
 export async function checkHealth() {
   return apiFetch("/health");
 }
+
+// ─── WebSocket URL ────────────────────────────────────────────────────
+export const SOCKET_URL = BASE_URL;
